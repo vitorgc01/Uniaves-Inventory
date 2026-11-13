@@ -48,6 +48,7 @@ dialog{border:1px solid var(--line);border-radius:16px;padding:22px;width:min(54
 <div id="empty" class="empty" hidden></div>
 <div class="pager"><span id="range"></span><div class="actions"><button class="button" id="prev">Anterior</button><button class="button" id="next">Próxima</button></div></div>
 </section>
+<p class="foot" id="local-recovery" hidden><button class="button" id="download-local" type="button">Baixar edições deste navegador</button> <span id="local-count"></span></p>
 <p class="foot" id="access-mode">Carregando inventário compartilhado…</p>
 <input id="file" type="file" accept=".csv,.json,text/csv,application/json" hidden>
 </main>
@@ -445,6 +446,26 @@ $("file").onchange = async event => {
   }
 };
 render();
+function offerLocalRecovery() {
+  try {
+    const saved = localStorage.getItem("uniaves-inventario-v1");
+    if (saved === null) return;
+    const local = validateBackup(JSON.parse(saved));
+    $("local-count").textContent = local.length + " registros na cópia local";
+    $("download-local").onclick = () => {
+      const url = URL.createObjectURL(new Blob([saved], {type:"application/json"}));
+      const link = node("a");
+      link.href = url;
+      link.download = "uniaves-edicoes-recuperadas.json";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    };
+    $("local-recovery").hidden = false;
+  } catch {
+    // O armazenamento pode estar bloqueado ou a cópia pode estar inválida.
+  }
+}
+offerLocalRecovery();
 loadInventory().catch(error => {
   $("access-mode").textContent = "Inventário compartilhado indisponível";
   notify(error.message);
