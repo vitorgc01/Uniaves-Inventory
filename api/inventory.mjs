@@ -1,23 +1,17 @@
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 
-const admin = "vitor.cogo@uniaves.com.br";
-const key = "uniaves:inventory:v1";
-const cookie = "uniaves_session";
-const ttl = 8 * 60 * 60;
-const hash = value => createHash("sha256").update(value).digest("hex");
+const endpoint = "https://rgwglwafpzxekxwadedn.supabase.co";
+const apiKey = "sb_publishable_yo_UaXHtQHX_hMF2SCsF-w_JKtAVIau";
+const adminId = "97c1060e-0c1e-498a-adbe-03e0e29d8d59";
+const cookie = "uniaves_supabase";
 const reply = (body, status = 200, headers = {}) => Response.json(body, {
   status, headers: { "Cache-Control": "no-store", ...headers }
 });
 const sessionCookie = (token, age) => `${cookie}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${age}`;
-async function redis(...args) {
-  const response = await fetch(process.env.UPSTASH_REDIS_REST_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, "Content-Type": "application/json" },
-    body: JSON.stringify(args)
-  });
-  const data = await response.json();
-  if (!response.ok || data.error) throw Error("Redis indisponível");
-  return data.result;
+async function supabase(path, {token, body} = {}) {
+  const headers = {apikey:apiKey};
+  if (token) headers.Authorization = "Bearer " + token;
+  if (body) headers["Content-Type"] = "application/json";
+  return fetch(endpoint + path, {headers, cache:"no-store", method:body ? "POST" : "GET", body:body ? JSON.stringify(body) : undefined});
 }
 async function readJson(request, limit) {
   const reader = request.body?.getReader();
@@ -48,57 +42,57 @@ function validRecords(records) {
   }
   return true;
 }
-const limitLogin = "local n=redis.call('INCR',KEYS[1]); if n==1 then redis.call('EXPIRE',KEYS[1],900) end; return n";
-const compareAndSave = "local old=redis.call('GET',KEYS[1]); local rev=old and cjson.decode(old).revision or 0; if rev~=tonumber(ARGV[1]) then return 0 end; redis.call('SET',KEYS[1],ARGV[2]); return 1";
+
 export default {
   async fetch(request) {
     const method = request.method;
     if (!["GET", "POST", "PUT", "DELETE"].includes(method)) return reply({error:"Método inválido."},405);
-    if (method !== "GET") {
-      const origin = request.headers.get("origin");
-      if (origin !== new URL(request.url).origin) return reply({error:"Origem inválida."},403);
+    if (method !== "GET" && request.headers.get("origin") !== new URL(request.url).origin) {
+      return reply({error:"Origem inválida."},403);
     }
     try {
-      const token = request.headers.get("cookie")?.match(/(?:^|;\s*)uniaves_session=([a-f0-9]{64})(?:;|$)/)?.[1];
-      const session = token && `uniaves:session:${hash(token)}`;
-      const config = process.env.UNIAVES_ADMIN_PASSWORD_HASH?.match(/^([a-f0-9]{32}):([a-f0-9]{128})$/i);
-      const account = config ? hash(config[0]) : "";
+      const token = request.headers.get("cookie")?.match(/(?:^|;\s*)uniaves_supabase=([A-Za-z0-9._-]+)(?:;|$)/)?.[1];
+      if (method === "DELETE") return reply({canEdit:false},200,{"Set-Cookie":sessionCookie("",0)});
       if (method === "POST") {
-        if (!config) return reply({error:"Login ainda não configurado."},503);
         let input;
         try { input = await readJson(request, 4096); } catch { return reply({error:"Login inválido."},400); }
-        const ip = (request.headers.get("x-vercel-forwarded-for") || "unknown").split(",")[0].trim();
-        if (await redis("EVAL", limitLogin, 1, `uniaves:attempt:${hash(ip)}`) > 10) return reply({error:"Muitas tentativas. Aguarde 15 minutos."},429);
-        const { email, password } = input || {};
-        if (typeof password !== "string" || password.length > 256 || typeof email !== "string" || email.trim().toLowerCase() !== admin ||
-            !timingSafeEqual(scryptSync(password, config[1], 64), Buffer.from(config[2], "hex"))) {
-          return reply({error:"E-mail ou senha inválidos."},401);
+        const {email, password} = input || {};
+        if (typeof email !== "string" || typeof password !== "string" || password.length > 256) {
+          return reply({error:"Login inválido."},400);
         }
-        const next = randomBytes(32).toString("hex");
-        await redis("SET", `uniaves:session:${hash(next)}`, account, "EX", ttl);
-        return reply({canEdit:true},200,{"Set-Cookie":sessionCookie(next,ttl)});
+        const auth = await supabase("/auth/v1/token?grant_type=password", {body:{email:email.trim(),password}});
+        const result = await auth.json();
+        if (result.error_code === "email_not_confirmed") return reply({error:"Confirme seu e-mail no Supabase para entrar."},401);
+        if (auth.status === 429) return reply({error:"Muitas tentativas. Tente novamente mais tarde."},429);
+        if (!auth.ok || result.user?.id !== adminId) return reply({error:"E-mail ou senha inválidos."},401);
+        return reply({canEdit:true},200,{"Set-Cookie":sessionCookie(result.access_token,result.expires_in)});
       }
-      const canEdit = Boolean(account && session && await redis("GET", session) === account);
-      if (method === "DELETE") {
-        if (canEdit) await redis("DEL", session);
-        return reply({canEdit:false},200,{"Set-Cookie":sessionCookie("",0)});
+      let canEdit = false;
+      if (token) {
+        const auth = await supabase("/auth/v1/user",{token});
+        if (auth.ok) canEdit = (await auth.json()).id === adminId;
       }
       if (method === "GET") {
-        const saved = await redis("GET", key);
-        const inventory = saved ? JSON.parse(saved) : { revision:0, records:[] };
-        if (!canEdit) inventory.records = inventory.records.map(({source, notes, ...row}) => ({...row, source:"", notes:""}));
-        return reply({...inventory, canEdit});
+        const audience = canEdit ? "admin" : "public";
+        const result = await supabase("/rest/v1/uniaves_inventory?select=revision,records&audience=eq." + audience, {token:canEdit ? token : undefined});
+        if (!result.ok) throw Error("Falha de consulta");
+        const [inventory] = await result.json();
+        if (!inventory) throw Error("Inventário ausente");
+        if (!canEdit) inventory.records = inventory.records.map(row => ({...row, notes:"", source:""}));
+        return reply({...inventory,canEdit});
       }
       if (!canEdit) return reply({error:"Entre com a conta de administrador para salvar."},403);
       let data;
       try { data = await readJson(request, 1000000); } catch { return reply({error:"Arquivo inválido ou grande demais."},400); }
       if (!Number.isSafeInteger(data?.revision) || data.revision < 0 || !validRecords(data.records)) return reply({error:"Inventário inválido."},400);
-      const revision = data.revision + 1;
       const records = data.records.map(({id,host,person,sector,provider,notes,source,review,activity}) => ({id,host,person,sector,provider,notes,source,review,activity}));
-      const saved = await redis("EVAL", compareAndSave, 1, key, data.revision, JSON.stringify({revision, records}));
-      return saved ? reply({revision}) : reply({error:"O inventário mudou. Recarregue a página e tente novamente."},409);
+      const result = await supabase("/rest/v1/rpc/uniaves_save_inventory",{token,body:{expected:data.revision,full_records:records}});
+      if (!result.ok) throw Error("Falha de gravação");
+      const revision = await result.json();
+      return revision === null ? reply({error:"O inventário mudou. Recarregue a página e tente novamente."},409) : reply({revision});
     } catch {
       return reply({error:"Não foi possível acessar o inventário compartilhado."},503);
     }
   }
 };
+
