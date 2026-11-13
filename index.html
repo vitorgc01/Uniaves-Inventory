@@ -445,3 +445,10 @@ $("file").onchange = async event => {
   }
 };
 render();
+loadInventory().catch(error => {
+  $("access-mode").textContent = "Inventário compartilhado indisponível";
+  notify(error.message);
+});
+</script>
+</body>
+</html>
