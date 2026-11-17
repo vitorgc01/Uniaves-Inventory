@@ -23,6 +23,7 @@ input,select,textarea{border:1px solid #ded3d3;border-radius:8px;background:#fff
 dialog{border:1px solid var(--line);border-radius:16px;padding:22px;width:min(545px,calc(100% - 30px));color:var(--ink);max-height:calc(100dvh - 30px);overflow:auto}dialog::backdrop{background:#251b1db3}dialog h2{margin:0 0 15px;letter-spacing:-.03em}dialog p{color:var(--muted)}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.fields label{display:grid;gap:4px;font-size:13px;font-weight:650}.wide{grid-column:1/-1}.fields .check{display:flex;align-items:center}.dialog-actions{margin-top:19px;justify-content:flex-end}.error{color:#a22230;font-size:13px;margin:8px 0 0}
 @media(max-width:850px){.top,main{width:calc(100% - 32px)}.heading{align-items:flex-start;flex-direction:column}.stats{grid-template-columns:1fr 1fr}}@media(max-width:560px){.brand span{display:none}.top{min-height:74px}.brand img{width:88px}}@media(max-width:420px){main{padding-top:26px}.storage{font-size:11px}.stat{padding:10px;gap:8px}.stat-icon{width:30px;height:30px}.fields{grid-template-columns:1fr}.pager{align-items:flex-start;flex-direction:column}}
 [hidden]{display:none!important}
+.network-online{background:#e4f6eb;color:#16603b}.network-unreachable{background:#fde7e9;color:#9f1220}
 </style>
 </head>
 <body>
@@ -44,7 +45,7 @@ dialog{border:1px solid var(--line);border-radius:16px;padding:22px;width:min(54
 <select id="provider" aria-label="Filtrar por fornecedor"></select>
 <select id="activity" aria-label="Filtrar por status"><option value="">Todos os status</option><option value="active" selected>Ativo</option><option value="off">Off</option></select>
 <select id="status" aria-label="Filtrar por revisão"><option value="">Todas as situações</option><option value="review">Para revisar</option><option value="ok">Sem pendências</option></select></div>
-<div class="table-wrap" id="table-wrap"><table><thead><tr><th scope="col">Status</th><th scope="col">Host / identificação</th><th scope="col">Colaborador / local</th><th scope="col">Setor</th><th scope="col">Fornecedor / vínculo</th><th scope="col" id="action-column" hidden>Ações</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="table-wrap" id="table-wrap"><table><thead><tr><th scope="col">Status</th><th scope="col">Rede</th><th scope="col">Host / identificação</th><th scope="col">Colaborador / local</th><th scope="col">Setor</th><th scope="col">Fornecedor / vínculo</th><th scope="col" id="action-column" hidden>Ações</th></tr></thead><tbody id="rows"></tbody></table></div>
 <div id="empty" class="empty" hidden></div>
 <div class="pager"><span id="range"></span><div class="actions"><button class="button" id="prev">Anterior</button><button class="button" id="next">Próxima</button></div></div>
 </section>
@@ -220,6 +221,7 @@ function render() {
   page = Math.min(page, pageCount);
   const start = (page - 1) * pageSize;
   $("rows").replaceChildren(...results.slice(start, start + pageSize).map(renderRow));
+  updateNetworkIndicators();
   $("result").textContent = results.length + (results.length === 1 ? " máquina encontrada" : " máquinas encontradas");
   $("range").textContent = results.length ? `${start + 1}–${Math.min(start + pageSize, results.length)} de ${results.length}` : "0 registros";
   $("table-wrap").hidden = !results.length;
@@ -237,6 +239,29 @@ function render() {
     );
   }
 }
+let networkSnapshot;
+function updateNetworkIndicators() {
+  const age = Date.now() - Date.parse(networkSnapshot?.checked_at);
+  const fresh = Number.isFinite(age) && age < 180000;
+  for (const indicator of document.querySelectorAll("[data-monitor-host]")) {
+    const online = fresh ? networkSnapshot.statuses?.[indicator.dataset.monitorHost] : undefined;
+    const label = online === true ? "Online" : online === false ? "Sem resposta" : "Sem dados recentes";
+    indicator.textContent = label;
+    indicator.className = online === true ? "pill network-online" : online === false ? "pill network-unreachable" : "pill";
+  }
+}
+async function refreshNetworkStatus() {
+  try {
+    const response = await fetch("https://rgwglwafpzxekxwadedn.supabase.co/rest/v1/uniaves_network_status?select=checked_at,statuses", {
+      headers: {apikey: "sb_publishable_yo_UaXHtQHX_hMF2SCsF-w_JKtAVIau"}, cache: "no-store", signal: AbortSignal.timeout(10000)
+    });
+    if (response.ok) [networkSnapshot] = await response.json();
+  } catch {
+    // O último resultado válido expira automaticamente.
+  }
+  updateNetworkIndicators();
+}
+
 function renderRow(record) {
   const tr = node("tr");
   const host = node("td");
@@ -261,7 +286,15 @@ function renderRow(record) {
     () => save(records.filter(item => item.id !== record.id), "Máquina excluída."));
   buttons.append(edit, remove);
   if (canEdit) actions.append(buttons);
-  tr.append(status, host, node("td", record.person || "—"), node("td", record.sector || "—"), node("td", record.provider || "—"), actions);
+  const network = node("td");
+  if (!off) {
+    const badge = node("span", "", "pill");
+    badge.dataset.monitorHost = record.host.trim().toLowerCase();
+    network.append(badge);
+  } else {
+    network.textContent = "—";
+  }
+  tr.append(status, network, host, node("td", record.person || "—"), node("td", record.sector || "—"), node("td", record.provider || "—"), actions);
   return tr;
 }
 function clearFilters() {
@@ -464,6 +497,8 @@ function offerLocalRecovery() {
   }
 }
 offerLocalRecovery();
+refreshNetworkStatus();
+setInterval(refreshNetworkStatus, 15000);
 loadInventory().catch(error => {
   $("access-mode").textContent = "Inventário compartilhado indisponível";
   notify(error.message);
